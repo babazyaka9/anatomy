@@ -43,11 +43,14 @@ class _MenuScreenState extends State<MenuScreen> {
     _loadData();
   }
 
+  // БЕЗПЕЧНЕ ЗАВАНТАЖЕННЯ ДАНИХ
   Future<void> _loadData() async {
     try {
+      // 1. Вантажимо питання
       final jsonString = await rootBundle.loadString('questions.json');
       final List<dynamic> data = json.decode(jsonString);
 
+      // 2. Вантажимо прогрес
       final prefs = await SharedPreferences.getInstance();
       final savedProgress = prefs.getString('user_progress');
       
@@ -60,13 +63,19 @@ class _MenuScreenState extends State<MenuScreen> {
       if (savedProgress != null) {
         try {
           final decoded = json.decode(savedProgress);
-          progressMap["wrong_indices"] = decoded["wrong_indices"] ?? [];
-          progressMap["chunk_results"] = decoded["chunk_results"] ?? {};
-          progressMap["active_sessions"] = decoded["active_sessions"] ?? {};
+          // Безпечне приведення типів (захист від крашу)
+          if (decoded["wrong_indices"] is List) {
+            progressMap["wrong_indices"] = decoded["wrong_indices"];
+          }
+          if (decoded["chunk_results"] is Map) {
+            progressMap["chunk_results"] = decoded["chunk_results"];
+          }
+          if (decoded["active_sessions"] is Map) {
+            progressMap["active_sessions"] = decoded["active_sessions"];
+          }
         } catch (e) {
-          print("Error parsing progress: $e");
-          // Якщо файл прогресу битий - скидаємо його
-          await prefs.remove('user_progress');
+          print("Progress corrupted: $e");
+          await prefs.remove('user_progress'); // Якщо дані биті - видаляємо
         }
       }
 
@@ -78,6 +87,7 @@ class _MenuScreenState extends State<MenuScreen> {
         });
       }
     } catch (e) {
+      print("Global error: $e");
       if (mounted) setState(() => _isLoading = false);
     }
   }
@@ -86,6 +96,16 @@ class _MenuScreenState extends State<MenuScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('user_progress');
     _loadData();
+  }
+
+  // Допоміжна функція для безпечного отримання списку помилок
+  List<int> _getSafeWrongIndices() {
+    final raw = _progress['wrong_indices'];
+    if (raw is List) {
+      // Фільтруємо тільки числа
+      return raw.whereType<int>().toList();
+    }
+    return [];
   }
 
   void _handleTestTap(int start, int end, String key) {
@@ -97,7 +117,7 @@ class _MenuScreenState extends State<MenuScreen> {
         context: context,
         builder: (ctx) => AlertDialog(
           title: const Text("Тест не завершено"),
-          content: Text("Ви зупинилися на питанні ${activeSession['index'] + 1}. Бажаєте продовжити?"),
+          content: Text("Ви зупинилися на питанні ${(activeSession['index'] ?? 0) + 1}. Бажаєте продовжити?"),
           actions: [
             TextButton(
               onPressed: () {
@@ -127,7 +147,7 @@ class _MenuScreenState extends State<MenuScreen> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    final wrongIndices = List<int>.from(_progress['wrong_indices'] ?? []);
+    final wrongIndices = _getSafeWrongIndices();
     final chunkResults = _progress['chunk_results'] ?? {};
     final activeSessions = _progress['active_sessions'] ?? {};
     const chunkSize = 40;
@@ -141,7 +161,6 @@ class _MenuScreenState extends State<MenuScreen> {
           IconButton(
             icon: const Icon(Icons.delete_outline, color: Colors.red),
             onPressed: _resetProgress,
-            tooltip: "Скинути прогрес (виправити помилки)",
           )
         ],
       ),
@@ -191,7 +210,7 @@ class _MenuScreenState extends State<MenuScreen> {
                 cardColor = Colors.red.shade50;
               }
             } else if (active != null) {
-              int done = active['index'];
+              int done = active['index'] ?? 0;
               status = "Зупинено: $done/${end - start}";
               icon = Icons.pause_circle_filled;
               iconColor = Colors.orange;
@@ -288,11 +307,10 @@ class _QuizScreenState extends State<QuizScreen> {
     // 1. Формуємо список питань
     List<dynamic> rawQuestions = [];
     if (widget.mode == 'chunk') {
-      if (widget.end > widget.allQuestions.length) {
-         // Захист від виходу за межі масиву
-         rawQuestions = widget.allQuestions.sublist(widget.start);
-      } else {
-         rawQuestions = widget.allQuestions.sublist(widget.start, widget.end);
+      int safeEnd = widget.end;
+      if (safeEnd > widget.allQuestions.length) safeEnd = widget.allQuestions.length;
+      if (widget.start < safeEnd) {
+        rawQuestions = widget.allQuestions.sublist(widget.start, safeEnd);
       }
     } else {
       rawQuestions = widget.allQuestions.where((q) => widget.wrongIds!.contains(q['id'])).toList();
@@ -303,11 +321,16 @@ class _QuizScreenState extends State<QuizScreen> {
     if (widget.resumeData != null) {
       _currentIndex = widget.resumeData['index'] ?? 0;
       _score = widget.resumeData['score'] ?? 0;
-      _newWrongs = List<int>.from(widget.resumeData['new_wrongs'] ?? []);
-      _correctIds = List<int>.from(widget.resumeData['correct_ids'] ?? []);
+      // Безпечне відновлення списків
+      if (widget.resumeData['new_wrongs'] is List) {
+        _newWrongs = List<int>.from(widget.resumeData['new_wrongs'].whereType<int>());
+      }
+      if (widget.resumeData['correct_ids'] is List) {
+        _correctIds = List<int>.from(widget.resumeData['correct_ids'].whereType<int>());
+      }
     }
 
-    // Захист: якщо індекс виходить за межі (через зміну бази), скидаємо
+    // Захист від виходу за межі
     if (_currentIndex >= _quizQuestions.length) {
       _currentIndex = 0;
       _score = 0;
@@ -319,13 +342,11 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   Map<String, dynamic> _shuffleQuestion(dynamic originalQ) {
-    // ЗАХИСТ ВІД ПОМИЛОК СТРУКТУРИ
     try {
       List<String> opts = List<String>.from(originalQ['opts']);
-      if (opts.isEmpty) return originalQ; // Якщо варіантів немає, повертаємо як є
+      if (opts.isEmpty) return originalQ;
       
       int correctIndex = originalQ['c'];
-      // Якщо індекс неправильний, ставимо 0
       if (correctIndex < 0 || correctIndex >= opts.length) correctIndex = 0;
       
       String correctText = opts[correctIndex];
@@ -339,7 +360,6 @@ class _QuizScreenState extends State<QuizScreen> {
         "c": newCorrectIndex
       };
     } catch (e) {
-      // У разі будь-якої помилки повертаємо оригінал, щоб не впасти
       return originalQ;
     }
   }
@@ -364,7 +384,6 @@ class _QuizScreenState extends State<QuizScreen> {
   Future<void> _handleNextButton() async {
     final nextIndex = _currentIndex + 1;
 
-    // Зберігаємо сесію тільки якщо це звичайний тест і ми не в кінці
     if (widget.mode == 'chunk' && widget.chunkKey != null && nextIndex < _quizQuestions.length) {
       await _saveSessionState(nextIndex);
     }
@@ -398,15 +417,28 @@ class _QuizScreenState extends State<QuizScreen> {
     }
   }
 
+  // ГОЛОВНА ФУНКЦІЯ ЗАВЕРШЕННЯ - З ПОСИЛЕНИМ ЗАХИСТОМ
   Future<void> _finishQuiz() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       
-      Set<int> wrongSet = Set<int>.from(widget.currentProgress['wrong_indices'] ?? []);
+      // 1. Безпечне оновлення помилок (використовуємо Set для унікальності)
+      Set<int> wrongSet = {};
+      
+      // Читаємо існуючі помилки, перевіряючи тип
+      var rawWrongs = widget.currentProgress['wrong_indices'];
+      if (rawWrongs is List) {
+        wrongSet.addAll(rawWrongs.whereType<int>());
+      }
+      
+      // Додаємо нові
       wrongSet.addAll(_newWrongs);
+      // Прибираємо виправлені
       wrongSet.removeAll(_correctIds);
+      
       widget.currentProgress['wrong_indices'] = wrongSet.toList();
 
+      // 2. Оновлення результатів
       if (widget.mode == 'chunk' && widget.chunkKey != null) {
         double percent = 0;
         if (_quizQuestions.isNotEmpty) {
@@ -435,7 +467,8 @@ class _QuizScreenState extends State<QuizScreen> {
         MaterialPageRoute(builder: (context) => ResultScreen(score: _score, total: _quizQuestions.length)),
       );
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Помилка: $e")));
+      // Якщо все ж таки помилка - показуємо її і пробуємо зберегти хоча б порожній стан
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Помилка завершення: $e")));
     }
   }
 
