@@ -60,7 +60,6 @@ class _MenuScreenState extends State<MenuScreen> {
       if (savedProgress != null) {
         try {
           final decoded = json.decode(savedProgress);
-          // Безпечне відновлення
           if (decoded['wrong_indices'] is List) progressMap['wrong_indices'] = decoded['wrong_indices'];
           if (decoded['chunk_results'] is Map) progressMap['chunk_results'] = decoded['chunk_results'];
           if (decoded['active_sessions'] is Map) progressMap['active_sessions'] = decoded['active_sessions'];
@@ -85,7 +84,9 @@ class _MenuScreenState extends State<MenuScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('user_progress');
     _loadData();
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Дані скинуто!")));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Прогрес очищено")));
+    }
   }
 
   void _handleTestTap(int start, int end, String key) {
@@ -141,7 +142,7 @@ class _MenuScreenState extends State<MenuScreen> {
           IconButton(
             icon: const Icon(Icons.delete_forever, color: Colors.red),
             onPressed: _resetProgress,
-            tooltip: "Скинути весь прогрес",
+            tooltip: "Скинути дані",
           )
         ],
       ),
@@ -179,7 +180,7 @@ class _MenuScreenState extends State<MenuScreen> {
             Color cardColor = Colors.white;
 
             if (res != null) {
-              final percent = res['percent'] ?? 0.0;
+              final percent = res['percent'] ?? 0;
               status = "${res['score']}/${res['total']} (${percent.toInt()}%)";
               if (percent >= 60) {
                 icon = Icons.check_circle;
@@ -281,16 +282,15 @@ class _QuizScreenState extends State<QuizScreen> {
   bool _answered = false;
   int? _selectedOption;
   late Map<String, dynamic> _currentShuffledQuestion;
+  bool _isFinishing = false; // Блокування кнопки
 
   @override
   void initState() {
     super.initState();
-    // 1. Формування списку питань
     List<dynamic> rawQuestions = [];
     if (widget.mode == 'chunk') {
       int safeEnd = widget.end;
       if (safeEnd > widget.allQuestions.length) safeEnd = widget.allQuestions.length;
-      
       if (widget.start < safeEnd) {
         rawQuestions = widget.allQuestions.sublist(widget.start, safeEnd);
       }
@@ -345,6 +345,7 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   void _checkAnswer(int index) {
+    if (_isFinishing) return;
     setState(() {
       _selectedOption = index;
       _answered = true;
@@ -362,6 +363,8 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   Future<void> _handleNextButton() async {
+    if (_isFinishing) return;
+    
     final nextIndex = _currentIndex + 1;
 
     if (widget.mode == 'chunk' && widget.chunkKey != null && nextIndex < _quizQuestions.length) {
@@ -393,15 +396,17 @@ class _QuizScreenState extends State<QuizScreen> {
       widget.currentProgress['active_sessions'] = activeSessions;
       await prefs.setString('user_progress', json.encode(widget.currentProgress));
     } catch (e) {
-      print("Save error: $e");
+      print("Error saving session: $e");
     }
   }
 
-  // ВАЖЛИВЕ ВИПРАВЛЕННЯ: ЗАХИСТ ВІД ПОМИЛОК ПРИ ЗАВЕРШЕННІ
+  // --- ФІНАЛІЗАЦІЯ (Виправлена) ---
   Future<void> _finishQuiz() async {
+    setState(() => _isFinishing = true); // Блокуємо UI
+
     try {
       if (_quizQuestions.isEmpty) {
-        Navigator.pop(context); // Просто виходимо, якщо тест пустий
+        if (mounted) Navigator.pop(context);
         return;
       }
 
@@ -436,16 +441,17 @@ class _QuizScreenState extends State<QuizScreen> {
 
       await prefs.setString('user_progress', json.encode(widget.currentProgress));
 
-      if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => ResultScreen(score: _score, total: _quizQuestions.length)),
-      );
     } catch (e) {
-      // Якщо все ще помилка - просто виводимо в лог і не крашимо додаток
-      print("CRITICAL ERROR finishing quiz: $e");
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Помилка збереження результату. Спробуйте очистити дані.")));
+      print("Finish error: $e");
+      // Ігноруємо помилку, головне - вийти
     }
+
+    if (!mounted) return;
+    
+    // ПРИМУСОВИЙ ПЕРЕХІД
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (context) => ResultScreen(score: _score, total: _quizQuestions.length)),
+    );
   }
 
   @override
@@ -495,7 +501,7 @@ class _QuizScreenState extends State<QuizScreen> {
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 12),
                   child: InkWell(
-                    onTap: _answered ? null : () => _checkAnswer(index),
+                    onTap: (_answered || _isFinishing) ? null : () => _checkAnswer(index),
                     borderRadius: BorderRadius.circular(12),
                     child: Container(
                       padding: const EdgeInsets.all(16),
@@ -520,17 +526,19 @@ class _QuizScreenState extends State<QuizScreen> {
                 SizedBox(
                   height: 55,
                   child: ElevatedButton(
-                    onPressed: _handleNextButton,
+                    onPressed: _isFinishing ? null : _handleNextButton,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: isLastQuestion ? Colors.green : Colors.blueAccent,
                       foregroundColor: Colors.white,
                       elevation: 4,
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     ),
-                    child: Text(
-                      isLastQuestion ? "Завершити тест" : "Далі", 
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)
-                    ),
+                    child: _isFinishing 
+                      ? const CircularProgressIndicator(color: Colors.white)
+                      : Text(
+                          isLastQuestion ? "Завершити тест" : "Далі", 
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)
+                        ),
                   ),
                 ),
               const SizedBox(height: 20),
@@ -552,7 +560,6 @@ class ResultScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     double percent = 0;
     if (total > 0) percent = (score / total) * 100;
-    
     bool passed = percent >= 60;
 
     return Scaffold(
